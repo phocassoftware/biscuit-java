@@ -7,6 +7,7 @@ import net.i2p.crypto.eddsa.EdDSAEngine;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.security.*;
+import java.security.spec.InvalidKeySpecException;
 import java.util.ArrayList;
 
 import static io.vavr.API.Left;
@@ -18,12 +19,13 @@ class Token {
     public final ArrayList<byte[]> signatures;
     public final KeyPair next;
 
-    public Token(KeyPair rootKeyPair, byte[] message, KeyPair next) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException {
-        Signature sgr = new EdDSAEngine(MessageDigest.getInstance(KeyPair.ed25519.getHashAlgorithm()));
+    public Token(KeyPair rootKeyPair, byte[] message, KeyPair next) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException, InvalidKeySpecException {
         ByteBuffer algo_buf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
         algo_buf.putInt(Integer.valueOf(next.public_key().algorithm.getNumber()));
         algo_buf.flip();
-        sgr.initSign(rootKeyPair.private_key);
+
+        var sgr = KeyPair.signatureForAlgorithm(next.public_key().algorithm).orElseThrow(() -> new NoSuchAlgorithmException("Unknown algorithm"));
+        sgr.initSign(rootKeyPair.private_key());
         sgr.update(message);
         sgr.update(algo_buf);
         sgr.update(next.public_key().toBytes());
@@ -47,9 +49,9 @@ class Token {
         this.next = next;
     }
 
-    public Token append(KeyPair keyPair, byte[] message) throws NoSuchAlgorithmException, SignatureException, InvalidKeyException {
-        Signature sgr = new EdDSAEngine(MessageDigest.getInstance(KeyPair.ed25519.getHashAlgorithm()));
-        sgr.initSign(this.next.private_key);
+    public Token append(KeyPair keyPair, byte[] message) throws NoSuchAlgorithmException, SignatureException, InvalidKeyException, InvalidKeySpecException {
+        var sgr = KeyPair.signatureForAlgorithm(next.public_key().algorithm).orElseThrow(() -> new NoSuchAlgorithmException("Unknown algorithm"));
+        sgr.initSign(this.next.private_key());
         ByteBuffer algo_buf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
         algo_buf.putInt(Integer.valueOf(next.public_key().algorithm.getNumber()));
         algo_buf.flip();
@@ -68,14 +70,14 @@ class Token {
     }
 
     // FIXME: rust version returns a Result<(), error::Signature>
-    public Either<Error, Void> verify(PublicKey root) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException {
+    public Either<Error, Void> verify(PublicKey root) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException, InvalidKeySpecException {
         PublicKey current_key = root;
         for(int i = 0; i < this.blocks.size(); i++) {
             byte[] block = this.blocks.get(i);
             PublicKey next_key  = this.keys.get(i);
             byte[] signature = this.signatures.get(i);
 
-            Signature sgr = new EdDSAEngine(MessageDigest.getInstance(KeyPair.ed25519.getHashAlgorithm()));
+            var sgr = KeyPair.signatureForAlgorithm(next.public_key().algorithm).orElseThrow(() -> new NoSuchAlgorithmException("Unknown algorithm"));
             ByteBuffer algo_buf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
             algo_buf.putInt(Integer.valueOf(next.public_key().algorithm.getNumber()));
             algo_buf.flip();
@@ -91,7 +93,7 @@ class Token {
             }
         }
 
-        if(this.next.public_key == current_key.key) {
+        if(this.next.public_key() == current_key.key) {
             return Right(null);
         } else {
             return Left(new Error.FormatError.Signature.InvalidSignature("signature error: Verification equation was not satisfied"));

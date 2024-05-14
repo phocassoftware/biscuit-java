@@ -12,13 +12,13 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import io.vavr.Tuple3;
 import io.vavr.control.Either;
 import io.vavr.control.Option;
-import net.i2p.crypto.eddsa.EdDSAEngine;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.security.*;
+import java.security.spec.InvalidKeySpecException;
 import java.util.*;
 
 import static io.vavr.API.Left;
@@ -42,7 +42,7 @@ public class SerializedBiscuit {
      * @param slice
      * @return
      */
-    static public SerializedBiscuit from_bytes(byte[] slice, org.biscuitsec.biscuit.crypto.PublicKey root) throws NoSuchAlgorithmException, SignatureException, InvalidKeyException, Error {
+    static public SerializedBiscuit from_bytes(byte[] slice, org.biscuitsec.biscuit.crypto.PublicKey root) throws NoSuchAlgorithmException, SignatureException, InvalidKeyException, Error, InvalidKeySpecException, InvalidAlgorithmParameterException {
         try {
             Schema.Biscuit data = Schema.Biscuit.parseFrom(slice);
 
@@ -58,7 +58,7 @@ public class SerializedBiscuit {
      * @param slice
      * @return
      */
-    static public SerializedBiscuit from_bytes(byte[] slice, KeyDelegate delegate) throws NoSuchAlgorithmException, SignatureException, InvalidKeyException, Error {
+    static public SerializedBiscuit from_bytes(byte[] slice, KeyDelegate delegate) throws NoSuchAlgorithmException, SignatureException, InvalidKeyException, Error, InvalidKeySpecException, InvalidAlgorithmParameterException {
         try {
             Schema.Biscuit data = Schema.Biscuit.parseFrom(slice);
 
@@ -78,7 +78,7 @@ public class SerializedBiscuit {
         }
     }
 
-    static SerializedBiscuit from_bytes_inner(Schema.Biscuit data, org.biscuitsec.biscuit.crypto.PublicKey root) throws NoSuchAlgorithmException, SignatureException, InvalidKeyException, Error {
+    static SerializedBiscuit from_bytes_inner(Schema.Biscuit data, org.biscuitsec.biscuit.crypto.PublicKey root) throws NoSuchAlgorithmException, SignatureException, InvalidKeyException, Error, InvalidKeySpecException, InvalidAlgorithmParameterException {
         SerializedBiscuit b = SerializedBiscuit.deserialize(data);
         if (data.hasRootKeyId()) {
             b.root_key_id = Option.some(data.getRootKeyId());
@@ -106,7 +106,7 @@ public class SerializedBiscuit {
         try {
             Schema.Biscuit data = Schema.Biscuit.parseFrom(slice);
             return SerializedBiscuit.deserialize(data);
-        } catch (InvalidProtocolBufferException e) {
+        } catch (InvalidProtocolBufferException | NoSuchAlgorithmException | InvalidKeySpecException | InvalidAlgorithmParameterException e) {
             throw new Error.FormatError.DeserializationError(e.toString());
         }
     }
@@ -118,7 +118,7 @@ public class SerializedBiscuit {
      * @return SerializedBiscuit
      * @throws Error.FormatError.DeserializationError
      */
-    static private SerializedBiscuit deserialize(Schema.Biscuit data) throws Error.FormatError.DeserializationError {
+    static private SerializedBiscuit deserialize(Schema.Biscuit data) throws Error.FormatError.DeserializationError, NoSuchAlgorithmException, InvalidKeySpecException, InvalidAlgorithmParameterException {
         if(data.getAuthority().hasExternalSignature()) {
             throw new Error.FormatError.DeserializationError("the authority block must not contain an external signature");
         }
@@ -151,7 +151,16 @@ public class SerializedBiscuit {
 
         Option<org.biscuitsec.biscuit.crypto.KeyPair> secretKey = Option.none();
         if (data.getProof().hasNextSecret()) {
-            secretKey = Option.some(new org.biscuitsec.biscuit.crypto.KeyPair(data.getProof().getNextSecret().toByteArray()));
+            var algo = data.getAuthority().getNextKey().getAlgorithm();
+            KeyPair.KeyType keyType;
+            if (algo == Schema.PublicKey.Algorithm.Ed25519) {
+                keyType = KeyPair.KeyType.Ed25519;
+            } else if (algo == Schema.PublicKey.Algorithm.P256) {
+                keyType = KeyPair.KeyType.P256;
+            } else {
+                throw new Error.FormatError.DeserializationError("unknown algorithm");
+            }
+            secretKey = Option.some(org.biscuitsec.biscuit.crypto.KeyPair.generateKeyPair(data.getProof().getNextSecret().toByteArray(), keyType));
         }
 
         Option<byte[]> signature = Option.none();
@@ -245,8 +254,13 @@ public class SerializedBiscuit {
             algo_buf.putInt(Integer.valueOf(next_key.algorithm.getNumber()));
             algo_buf.flip();
 
-            Signature sgr = new EdDSAEngine(MessageDigest.getInstance(org.biscuitsec.biscuit.crypto.KeyPair.ed25519.getHashAlgorithm()));
-            sgr.initSign(root.private_key);
+            var sgrOpt = KeyPair.signatureForAlgorithm(next_key.algorithm);
+            if (sgrOpt.isEmpty()) {
+                return Left(new Error.FormatError.Signature.InvalidSignature("signature error: Unknown algorithm"));
+            }
+            var sgr = sgrOpt.get();
+
+            sgr.initSign(root.private_key());
             sgr.update(block);
             sgr.update(algo_buf);
             sgr.update(next_key.toBytes());
@@ -256,7 +270,7 @@ public class SerializedBiscuit {
             Proof proof = new Proof(next);
 
             return Right(new SerializedBiscuit(signedBlock, new ArrayList<>(), proof, root_key_id));
-        } catch (IOException | NoSuchAlgorithmException | SignatureException | InvalidKeyException e) {
+        } catch (IOException | NoSuchAlgorithmException | SignatureException | InvalidKeyException | InvalidKeySpecException e) {
             return Left(new Error.FormatError.SerializationError(e.toString()));
         }
     }
@@ -278,8 +292,13 @@ public class SerializedBiscuit {
             algo_buf.putInt(Integer.valueOf(next_key.algorithm.getNumber()));
             algo_buf.flip();
 
-            Signature sgr = new EdDSAEngine(MessageDigest.getInstance(org.biscuitsec.biscuit.crypto.KeyPair.ed25519.getHashAlgorithm()));
-            sgr.initSign(this.proof.secretKey.get().private_key);
+            var sgrOpt = KeyPair.signatureForAlgorithm(next_key.algorithm);
+            if (sgrOpt.isEmpty()) {
+                return Left(new Error.FormatError.Signature.InvalidSignature("signature error: Unknown algorithm"));
+            }
+            var sgr = sgrOpt.get();
+
+            sgr.initSign(this.proof.secretKey.get().private_key());
             sgr.update(block);
             sgr.update(algo_buf);
             sgr.update(next_key.toBytes());
@@ -296,7 +315,7 @@ public class SerializedBiscuit {
             Proof proof = new Proof(next);
 
             return Right(new SerializedBiscuit(this.authority, blocks, proof, root_key_id));
-        } catch (IOException | NoSuchAlgorithmException | SignatureException | InvalidKeyException e) {
+        } catch (IOException | NoSuchAlgorithmException | SignatureException | InvalidKeyException | InvalidKeySpecException e) {
             return Left(new Error.FormatError.SerializationError(e.toString()));
         }
     }
@@ -342,7 +361,7 @@ public class SerializedBiscuit {
         throw new RuntimeException("todo");
     }
 
-    public Either<Error, Void> verify(org.biscuitsec.biscuit.crypto.PublicKey root) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException {
+    public Either<Error, Void> verify(org.biscuitsec.biscuit.crypto.PublicKey root) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException, InvalidKeySpecException {
         org.biscuitsec.biscuit.crypto.PublicKey current_key = root;
         ByteBuffer algo_buf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
         {
@@ -397,7 +416,11 @@ public class SerializedBiscuit {
             algo_buf.putInt(next_key.algorithm.getNumber());
             algo_buf.flip();
 
-            Signature sgr = new EdDSAEngine(MessageDigest.getInstance(org.biscuitsec.biscuit.crypto.KeyPair.ed25519.getHashAlgorithm()));
+            var sgrOpt = KeyPair.signatureForAlgorithm(next_key.algorithm);
+            if (sgrOpt.isEmpty()) {
+                return Left(new Error.FormatError.Signature.InvalidSignature("signature error: Unknown algorithm"));
+            }
+            var sgr = sgrOpt.get();
 
             sgr.initVerify(current_key.key);
             sgr.update(block);
@@ -427,7 +450,11 @@ public class SerializedBiscuit {
         algo_buf.putInt(Integer.valueOf(next_key.algorithm.getNumber()));
         algo_buf.flip();
 
-        Signature sgr = new EdDSAEngine(MessageDigest.getInstance(org.biscuitsec.biscuit.crypto.KeyPair.ed25519.getHashAlgorithm()));
+        var sgrOpt = KeyPair.signatureForAlgorithm(next_key.algorithm);
+        if (sgrOpt.isEmpty()) {
+            return Left(new Error.FormatError.Signature.InvalidSignature("signature error: Unknown algorithm"));
+        }
+        var sgr = sgrOpt.get();
 
         sgr.initVerify(publicKey.key);
         sgr.update(block);
@@ -445,7 +472,12 @@ public class SerializedBiscuit {
             algo_buf2.putInt(Integer.valueOf(publicKey.algorithm.getNumber()));
             algo_buf2.flip();
 
-            Signature sgr2 = new EdDSAEngine(MessageDigest.getInstance(org.biscuitsec.biscuit.crypto.KeyPair.ed25519.getHashAlgorithm()));
+            var sgr2Opt = KeyPair.signatureForAlgorithm(publicKey.algorithm);
+            if (sgr2Opt.isEmpty()) {
+                return Left(new Error.FormatError.Signature.InvalidSignature("external signature error: Unknown algorithm"));
+            }
+            var sgr2 = sgr2Opt.get();
+
             sgr2.initVerify(signedBlock.externalSignature.get().key.key);
             sgr2.update(block);
             sgr2.update(algo_buf2);
@@ -530,13 +562,18 @@ public class SerializedBiscuit {
             block = this.blocks.get(this.blocks.size() - 1);
         }
 
-        Signature sgr = new EdDSAEngine(MessageDigest.getInstance(KeyPair.ed25519.getHashAlgorithm()));
+        var sgrOpt = KeyPair.signatureForAlgorithm(block.key.algorithm);
+        if (sgrOpt.isEmpty()) {
+            return Left(new Error.FormatError.Signature.InvalidSignature("signature error: Unknown algorithm"));
+        }
+        var sgr = sgrOpt.get();
+
         ByteBuffer algo_buf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
         algo_buf.putInt(Integer.valueOf(block.key.algorithm.getNumber()));
         algo_buf.flip();
 
 
-        sgr.initSign(this.proof.secretKey.get().private_key);
+        sgr.initSign(this.proof.secretKey.get().private_key());
         sgr.update(block.block);
         sgr.update(algo_buf);
         sgr.update(block.key.toBytes());

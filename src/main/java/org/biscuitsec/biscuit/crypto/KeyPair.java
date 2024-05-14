@@ -1,77 +1,75 @@
 package org.biscuitsec.biscuit.crypto;
 
-
 import biscuit.format.schema.Schema;
-import org.biscuitsec.biscuit.token.builder.Utils;
-import net.i2p.crypto.eddsa.EdDSAPrivateKey;
-import net.i2p.crypto.eddsa.EdDSAPublicKey;
-import net.i2p.crypto.eddsa.spec.*;
+import net.i2p.crypto.eddsa.EdDSAEngine;
 
+import java.security.InvalidAlgorithmParameterException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
 import java.security.SecureRandom;
+import java.security.Signature;
+import java.security.spec.InvalidKeySpecException;
+import java.util.Optional;
 
 /**
- * Private and public key
+ * Abstract class for representing a key pair.
  */
-public final class KeyPair {
-    public final EdDSAPrivateKey private_key;
-    public final EdDSAPublicKey public_key;
+public abstract class KeyPair {
 
-    private static final int ED25519_PUBLIC_KEYSIZE = 32;
-    private static final int ED25519_PRIVATE_KEYSIZE = 64;
-    private static final int ED25519_SEED_SIZE = 32;
-    public static final EdDSANamedCurveSpec ed25519 = EdDSANamedCurveTable.getByName(EdDSANamedCurveTable.ED_25519);
-
-    public KeyPair() {
-        this(new SecureRandom());
+    public enum KeyType {
+        Ed25519,
+        P256,
     }
 
-    public KeyPair(final SecureRandom rng) {
-        byte[] b = new byte[32];
-        rng.nextBytes(b);
+    public abstract byte[] toBytes();
 
-        EdDSAPrivateKeySpec privKeySpec = new EdDSAPrivateKeySpec(b, ed25519);
-        EdDSAPrivateKey privKey = new EdDSAPrivateKey(privKeySpec);
+    public abstract String toHex();
 
-        EdDSAPublicKeySpec pubKeySpec = new EdDSAPublicKeySpec(privKey.getA(), ed25519);
-        EdDSAPublicKey pubKey = new EdDSAPublicKey(pubKeySpec);
+    public abstract PrivateKey private_key();
 
-        this.private_key = privKey;
-        this.public_key = pubKey;
+    public abstract PublicKey public_key() throws NoSuchAlgorithmException, InvalidKeySpecException;
+
+    public static String getHashAlgorithm(KeyType keyType) {
+        switch (keyType) {
+            case Ed25519:
+                return Ed25519KeyPair.ed25519.getHashAlgorithm();
+            case P256:
+                return P256KeyPair.HASH_ALGORITHM;
+            default:
+                throw new IllegalArgumentException("Unsupported key type: " + keyType);
+        }
     }
 
-    public byte[] toBytes() {
-        return this.private_key.getSeed();
+    public static KeyPair generateKeyPair(SecureRandom secureRandom, KeyType keyType) throws NoSuchAlgorithmException, InvalidAlgorithmParameterException {
+        switch (keyType) {
+            case Ed25519:
+                return new Ed25519KeyPair(secureRandom);
+            case P256:
+                return new P256KeyPair(secureRandom);
+            default:
+                throw new IllegalArgumentException("Unsupported key type: " + keyType);
+        }
     }
 
-    public KeyPair(byte[] b) {
-        EdDSAPrivateKeySpec privKeySpec = new EdDSAPrivateKeySpec(b, ed25519);
-        EdDSAPrivateKey privKey = new EdDSAPrivateKey(privKeySpec);
-
-        EdDSAPublicKeySpec pubKeySpec = new EdDSAPublicKeySpec(privKey.getA(), ed25519);
-        EdDSAPublicKey pubKey = new EdDSAPublicKey(pubKeySpec);
-
-        this.private_key = privKey;
-        this.public_key = pubKey;
+    public static KeyPair generateKeyPair(byte[] bytes, KeyType keyType) throws NoSuchAlgorithmException, InvalidAlgorithmParameterException {
+        switch (keyType) {
+            case Ed25519:
+                return new Ed25519KeyPair(bytes);
+            case P256:
+                return new P256KeyPair(bytes);
+            default:
+                throw new IllegalArgumentException("Unsupported key type: " + keyType);
+        }
     }
 
-    public String toHex() {
-        return Utils.byteArrayToHexString(this.toBytes());
-    }
-
-    public KeyPair(String hex) {
-        byte[] b = Utils.hexStringToByteArray(hex);
-
-        EdDSAPrivateKeySpec privKeySpec = new EdDSAPrivateKeySpec(b, ed25519);
-        EdDSAPrivateKey privKey = new EdDSAPrivateKey(privKeySpec);
-
-        EdDSAPublicKeySpec pubKeySpec = new EdDSAPublicKeySpec(privKey.getA(), ed25519);
-        EdDSAPublicKey pubKey = new EdDSAPublicKey(pubKeySpec);
-
-        this.private_key = privKey;
-        this.public_key = pubKey;
-    }
-
-    public PublicKey public_key() {
-        return new PublicKey(Schema.PublicKey.Algorithm.Ed25519, this.public_key);
+    public static Optional<Signature> signatureForAlgorithm(Schema.PublicKey.Algorithm algorithm) throws NoSuchAlgorithmException {
+        var sgr = Optional.<Signature>empty();
+        if (algorithm == Schema.PublicKey.Algorithm.Ed25519) {
+            sgr = Optional.of(new EdDSAEngine(MessageDigest.getInstance(getHashAlgorithm(KeyPair.KeyType.Ed25519))));
+        } else if (algorithm == Schema.PublicKey.Algorithm.P256) {
+            sgr = Optional.of(Signature.getInstance(getHashAlgorithm(KeyPair.KeyType.P256)));
+        }
+        return sgr;
     }
 }
